@@ -1,16 +1,15 @@
 # Root binary
+/wame
 /whatsapp-mcp
 /bin/
 
-# Local databases and media downloads
+# Local databases, env, and media downloads
 /store/
+.env
 
 # Daemon runtime
 daemon.pid
 daemon.log
-
-# Temporary wrapper
-/repos
 
 # OS artifacts
 .DS_Store

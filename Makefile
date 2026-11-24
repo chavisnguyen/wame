@@ -1,9 +1,9 @@
 # ========================================================
-# 1craft WhatsApp MCP Server (Pure Go Edition)
+# wame — Lightweight WhatsApp MCP Server (Pure Go)
 # ========================================================
 
 BIN_DIR := bin
-BIN_NAME := whatsapp-mcp
+BIN_NAME := wame
 BIN_PATH := $(BIN_DIR)/$(BIN_NAME)
 PID_FILE := daemon.pid
 LOG_FILE := daemon.log
@@ -13,42 +13,34 @@ PORT ?= 3026
 
 all: build
 
-## setup: 1-click build and auto-configure supported AI clients (AGY, Claude Desktop, Claude Code, Kiro)
+## setup: 1-click build, store setup, and auto-configure AI clients
 setup: build
-	@./install.sh sse
-	@echo ""
-	@echo "========================================================"
-	@echo "🎉 SETUP COMPLETE!"
-	@echo "========================================================"
-	@echo "1. Scan QR code to log in: make login"
-	@echo "2. Start background daemon: make daemon"
-	@echo "3. Run system diagnostics: make doctor"
-	@echo "========================================================"
+	@$(BIN_PATH) -port $(PORT) setup
 
 ## build: Compile pure Go binary
 build:
 	@mkdir -p $(BIN_DIR)
-	@go build -o $(BIN_PATH) ./cmd/whatsapp-mcp
+	@go build -o $(BIN_PATH) ./cmd/wame
 	@echo "✅ Build success: $(BIN_PATH)"
 
 ## install-sse: Configure MCP server in HTTP/SSE daemon mode (Recommended for multiple AI agents)
 install-sse: build
-	@./install.sh sse
+	@WAME_BIN="$(CURDIR)/$(BIN_PATH)" PORT=$(PORT) ./install.sh sse
 
 ## install-stdio: Configure MCP server in stdio mode (Standalone binary)
 install-stdio: build
-	@./install.sh stdio
+	@WAME_BIN="$(CURDIR)/$(BIN_PATH)" PORT=$(PORT) ./install.sh stdio
 
 ## install: Install binary to $GOPATH/bin
 install:
-	go install ./cmd/whatsapp-mcp
+	go install ./cmd/wame
 
 ## daemon: Start background HTTP/SSE daemon on port $(PORT) (for concurrent agents)
 daemon: build
 	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
 		echo "⚠️ Daemon already running (PID: $$(cat $(PID_FILE))) on port $(PORT)"; \
 	else \
-		echo "🚀 Starting WhatsApp HTTP/SSE Daemon on http://localhost:$(PORT)/mcp ..."; \
+		echo "🚀 Starting wame HTTP/SSE Daemon on http://localhost:$(PORT)/mcp ..."; \
 		nohup $(BIN_PATH) -sse -port $(PORT) > $(LOG_FILE) 2>&1 & echo $$! > $(PID_FILE); \
 		sleep 1; \
 		if kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
@@ -78,11 +70,11 @@ restart: stop daemon
 
 ## status: Check Daemon and WhatsApp session status
 status: build
-	@echo "--- WhatsApp Daemon Status ---"
+	@echo "--- wame Daemon Status ---"
 	@if [ -f $(PID_FILE) ] && kill -0 $$(cat $(PID_FILE)) 2>/dev/null; then \
 		echo "🟢 Daemon is RUNNING (PID: $$(cat $(PID_FILE))) on http://localhost:$(PORT)/mcp"; \
 	else \
-		echo "⚪ Daemon is NOT running (Run 'make daemon' to start)"; \
+		echo "⚪ Daemon is NOT running (Run 'make daemon' or 'brew services start wame')"; \
 	fi
 	@echo ""
 	@echo "--- WhatsApp Session Status ---"
@@ -106,7 +98,7 @@ update:
 
 ## test: Run all unit tests
 test:
-	@go test -v ./...
+	@go test -v -count=1 ./...
 
 ## clean: Clean bin directory, PID, and log files
 clean:

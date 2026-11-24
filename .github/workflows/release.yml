@@ -1,0 +1,143 @@
+name: Release assets
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag name (e.g. v2.0.0)'
+        required: true
+        default: 'v2.0.0'
+
+permissions:
+  contents: write
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Guard - package version matches release tag
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+          echo "Validating version consistency for $VERSION ($TAG)..."
+          grep -E "Version[[:space:]]+= \"${VERSION}\"" cmd/wame/main.go
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run tests
+        run: go test -v -count=1 ./...
+
+  binaries:
+    needs: gate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: darwin-arm64
+            os: macos-latest
+            goos: darwin
+            goarch: arm64
+          - target: darwin-amd64
+            os: macos-latest
+            goos: darwin
+            goarch: amd64
+          - target: linux-amd64
+            os: ubuntu-latest
+            goos: linux
+            goarch: amd64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build binary and package archive
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          VERSION="${TAG#v}"
+
+          mkdir -p /tmp/staging
+          CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
+            go build -ldflags="-s -w -X main.Version=${VERSION}" -o /tmp/staging/wame ./cmd/wame
+
+          ARCHIVE_NAME="wame-${{ matrix.target }}.tar.gz"
+          tar -czf "$GITHUB_WORKSPACE/$ARCHIVE_NAME" -C /tmp/staging wame
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: wame-${{ matrix.target }}.tar.gz
+
+  attach:
+    needs: binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: release-assets
+      - name: Generate Checksums
+        working-directory: release-assets
+        run: |
+          sha256sum wame-*.tar.gz > checksums.txt
+          cat checksums.txt
+      - name: Attach assets to Release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          gh release view "$TAG" || gh release create "$TAG" --title "wame $TAG" --notes "Release $TAG"
+          gh release upload "$TAG" release-assets/* --clobber
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-checksums
+          path: release-assets/checksums.txt
+
+  bump-formula:
+    needs: attach
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.repository.default_branch }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-checksums
+          path: .
+      - name: Bump Formula
+        run: |
+          TAG="${{ github.event.inputs.tag || github.ref_name }}"
+          ARM64_SHA=$(grep "wame-darwin-arm64.tar.gz" checksums.txt | awk '{print $1}')
+          AMD64_SHA=$(grep "wame-darwin-amd64.tar.gz" checksums.txt | awk '{print $1}')
+          LINUX_SHA=$(grep "wame-linux-amd64.tar.gz" checksums.txt | awk '{print $1}')
+
+          TAG="$TAG" ARM="$ARM64_SHA" INTEL="$AMD64_SHA" LINUX="$LINUX_SHA" python3 - << 'PYEOF'
+          import os, re
+
+          p = "Formula/wame.rb"
+          s = open(p).read()
+          tag = os.environ["TAG"]
+          sums = {
+              "darwin-arm64": os.environ["ARM"],
+              "darwin-amd64": os.environ["INTEL"],
+              "linux-amd64": os.environ["LINUX"],
+          }
+          for plat, sha in sums.items():
+              name = f"wame-{plat}.tar.gz"
+              s = re.sub(r"https://github\.com/chavisnguyen/wame/releases/download/[^/\"']+/" + re.escape(name),
+                         f"https://github.com/chavisnguyen/wame/releases/download/{tag}/{name}", s)
+              s = re.sub(r'(' + re.escape(name) + r'"\n\s*sha256 ")[0-9a-f]{64}', rf"\g<1>{sha}", s)
+          open(p, "w").write(s)
+          PYEOF
+
+          git diff --stat
+          git add Formula/wame.rb
+          git -c "user.name=wame-bot" -c "user.email=wame-bot@users.noreply.github.com" \
+            commit -m "chore(formula): bump to ${TAG}" && git push || echo "nothing to bump"

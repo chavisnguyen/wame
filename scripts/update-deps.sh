@@ -15,11 +15,11 @@ go get -u go.mau.fi/whatsmeow@latest
 echo "==> Running go mod tidy..."
 go mod tidy
 
-echo "==> Building whatsapp-mcp to verify compatibility..."
+echo "==> Building wame to verify compatibility..."
 mkdir -p bin
-go build -o bin/whatsapp-mcp ./cmd/whatsapp-mcp
+go build -o bin/wame ./cmd/wame
 
 echo "==> Updated whatsmeow version:"
 go list -m go.mau.fi/whatsmeow
 
-echo "==> Build successful! Binary is ready at bin/whatsapp-mcp"
+echo "==> Build successful! Binary is ready at bin/wame"

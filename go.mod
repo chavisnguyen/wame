@@ -1,4 +1,4 @@
-module whatsapp-mcp
+module wame
 
 go 1.26.0
 

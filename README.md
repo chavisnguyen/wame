@@ -1,32 +1,37 @@
-# 1craft WhatsApp MCP
+# wame
 
-[![Release](https://img.shields.io/github/v/release/chavisnguyen/1craft-wa-mcp?style=flat-square&color=blue)](https://github.com/chavisnguyen/1craft-wa-mcp/releases)
-[![Go](https://img.shields.io/badge/Go-1.24+-00ADD8?style=flat-square&logo=go)](https://golang.org)
+> Let your AI agent (Claude Code, Codex, OpenCode, AGY, Kiro, Claude Desktop) use **your personal WhatsApp** via MCP.
+
+[![Release](https://img.shields.io/github/v/release/chavisnguyen/wame?style=flat-square&color=blue)](https://github.com/chavisnguyen/wame/releases)
+[![Go](https://img.shields.io/badge/Go-1.26+-00ADD8?style=flat-square&logo=go)](https://golang.org)
 [![MCP](https://img.shields.io/badge/MCP-Compatible-blue?style=flat-square)](https://modelcontextprotocol.io)
 [![RAM](https://img.shields.io/badge/RAM-~15MB-brightgreen?style=flat-square)](README.md)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](LICENSE)
 
-Lightweight WhatsApp [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server written in pure Go. Connects AI agents (**Antigravity**, **Claude Desktop & CLI**, **Kiro**) directly to personal WhatsApp accounts.
+Lightweight WhatsApp [Model Context Protocol (MCP)](https://modelcontextprotocol.io) server written in Go. Connects AI agents directly to your personal WhatsApp account without Node or Python runtime dependencies.
 
 ---
 
-## Features
+## Install (macOS / Linux)
 
-- **Pure Go (~15MB RAM):** Single binary, zero Python/node dependencies.
-- **Shared Daemon (`:3026`):** One background process maintains the WhatsApp connection while serving multiple AI clients simultaneously without session drops or SQLite locks.
-- **1-Click Auto Config:** Automatically detects and configures AGY, Claude Desktop, Claude Code (CLI), and Kiro.
-- **Auto Updates (`make update`):** Keeps `whatsmeow` up-to-date with WhatsApp Web protocol changes.
-- **Voice & Media Support:** Handles photos, videos, documents, and PTT voice notes (via FFmpeg).
-
----
-
-## Quickstart
+### Option A: Homebrew (Recommended)
 
 ```bash
-git clone https://github.com/chavisnguyen/1craft-wa-mcp.git
-cd 1craft-wa-mcp
+brew tap chavisnguyen/wame https://github.com/chavisnguyen/wame
+brew install wame
+wame setup                 # Prepare ~/.wame/store and register "whatsapp" in all AI clients
+wame login                 # Scan QR code in terminal (one-time)
+brew services start wame   # Start background daemon on :3026 (auto-starts at login)
+wame doctor                # Verify store, session, daemon, and client configs
+```
 
-make setup   # Build binary and auto-configure all AI clients
+### Option B: Build from source
+
+```bash
+git clone https://github.com/chavisnguyen/wame.git
+cd wame
+
+make setup   # Build bin/wame and register "whatsapp" MCP in detected AI clients
 make login   # Scan QR code in terminal (one-time)
 make daemon  # Start background shared server on :3026
 make doctor  # Verify connection and configuration health
@@ -34,25 +39,47 @@ make doctor  # Verify connection and configuration health
 
 ---
 
+## Features
+
+- **Pure Go (~15MB RAM):** Single binary powered by `whatsmeow` and `mcp-go`.
+- **Shared Daemon (`:3026`):** One background process keeps your WhatsApp session alive while serving multiple AI clients concurrently (`http://localhost:3026/mcp`) without session drops or SQLite locks.
+- **Persistent Store (`~/.wame/store`):** Works reliably regardless of working directory or Homebrew install location (automatically migrates data from legacy `./store` on first run).
+- **1-Command Client Setup (`wame setup`):** Registers the `"whatsapp"` MCP server across **AGY**, **OpenCode**, **Claude Code**, **Kiro**, **Codex**, and **Claude Desktop** (stdio).
+- **Loopback & Origin Protection:** Binds to loopback (`127.0.0.1` & `[::1]`) and rejects unauthorized browser `Origin` headers on `/mcp`, `/sse`, and `/health`.
+- **Voice & Media Support:** Sends and downloads photos, videos, documents, and PTT voice notes (via FFmpeg).
+
+---
+
 ## Commands
 
 | Command | Action |
 | :--- | :--- |
-| `make setup` | Build and auto-configure all detected AI clients |
-| `make login` | Pair WhatsApp account via terminal QR code |
-| `make daemon` | Start shared background daemon on `http://localhost:3026/mcp` |
-| `make stop` | Stop background daemon |
-| `make restart` | Restart daemon |
-| `make status` | Check daemon PID and WhatsApp session status |
-| `make doctor` | Run full system diagnostic (`🟢/🟡/🔴`) |
-| `make update` | Update `whatsmeow` to latest and rebuild |
-| `make test` | Run unit tests |
-| `make clean` | Clean build artifacts, PID, and log files |
-| `make help` | Show available commands |
+| `wame setup` | Prepare `~/.wame/store` and register `"whatsapp"` MCP in all AI clients |
+| `wame login` | Pair WhatsApp account via terminal QR code |
+| `wame daemon` | Run shared HTTP/SSE daemon in foreground (`-port 3026`) |
+| `wame serve` | Run stdio MCP server (used by Claude Desktop / stdio clients) |
+| `wame status` | Check WhatsApp authentication & store path |
+| `wame doctor` | Run full system diagnostic (`🟢/🟡/🔴`) |
+| `wame version` | Print version (also `-v`, `--version`) |
+
+Source-checkout helpers (`Makefile`): `make setup | login | daemon | stop | restart | status | doctor | update | test | clean | help`.
 
 ---
 
-## Client Config (Manual)
+## Configuration (`.env` / env vars)
+
+Copy `.env.example` to `.env` (or `~/.wame/.env`):
+
+| Variable | Default | Description |
+| :--- | :--- | :--- |
+| `PORT` | `3026` | HTTP/SSE daemon port |
+| `HOST` | *(loopback)* | Specific bind host (empty binds `127.0.0.1` and `[::1]`) |
+| `WAME_STORE_DIR` | `~/.wame/store` | Directory for `whatsapp.db`, `messages.db`, and downloaded media |
+| `WAME_ALLOWED_ORIGINS` | *(empty)* | Comma-separated browser `Origin` allowlist (CLI clients need none) |
+
+---
+
+## Manual Client Config
 
 ### HTTP/SSE Shared Mode (Recommended)
 ```json
@@ -65,12 +92,12 @@ make doctor  # Verify connection and configuration health
 }
 ```
 
-### stdio Mode (Direct binary)
+### stdio Mode (Claude Desktop / Direct binary)
 ```json
 {
   "mcpServers": {
     "whatsapp": {
-      "command": "/ABSOLUTE/PATH/TO/1craft-wa-mcp/bin/whatsapp-mcp",
+      "command": "wame",
       "args": ["serve"]
     }
   }
@@ -101,4 +128,4 @@ make doctor  # Verify connection and configuration health
 
 ## License
 
-MIT
+[MIT](LICENSE)

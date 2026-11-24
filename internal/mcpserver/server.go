@@ -12,9 +12,9 @@ import (
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
 
-	"whatsapp-mcp/internal/audio"
-	"whatsapp-mcp/internal/store"
-	"whatsapp-mcp/internal/whatsapp"
+	"wame/internal/audio"
+	"wame/internal/store"
+	"wame/internal/whatsapp"
 )
 
 // Server implements Model Context Protocol (MCP) server for WhatsApp
@@ -24,10 +24,14 @@ type Server struct {
 	store     *store.Store
 }
 
-// NewServer registers all 12 MCP tools and initializes the MCP server
-func NewServer(waClient *whatsapp.Client, msgStore *store.Store) *Server {
+// NewServer registers all 13 MCP tools and initializes the MCP server
+func NewServer(waClient *whatsapp.Client, msgStore *store.Store, version ...string) *Server {
+	srvVersion := "2.0.0"
+	if len(version) > 0 && version[0] != "" {
+		srvVersion = version[0]
+	}
 	s := &Server{
-		mcpServer: server.NewMCPServer("whatsapp", "1.0.0"),
+		mcpServer: server.NewMCPServer("whatsapp", srvVersion),
 		waClient:  waClient,
 		store:     msgStore,
 	}

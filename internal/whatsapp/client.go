@@ -24,7 +24,7 @@ import (
 	waLog "go.mau.fi/whatsmeow/util/log"
 	"google.golang.org/protobuf/proto"
 
-	"whatsapp-mcp/internal/store"
+	"wame/internal/store"
 )
 
 // ClientStatus represents runtime information of WhatsApp connection

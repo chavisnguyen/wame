@@ -9,7 +9,7 @@ import (
 
 	"github.com/mark3labs/mcp-go/mcp"
 
-	"whatsapp-mcp/internal/store"
+	"wame/internal/store"
 )
 
 func TestMCPServer_ToolsRegistrationAndExecution(t *testing.T) {
