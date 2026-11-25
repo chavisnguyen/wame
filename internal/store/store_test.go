@@ -1,7 +1,10 @@
 package store
 
 import (
+	"database/sql"
 	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -157,5 +160,85 @@ func TestStore_AllOperations(t *testing.T) {
 	}
 	if mediaInfo.MediaType != "image" || mediaInfo.Filename != "photo.jpg" {
 		t.Errorf("Expected image photo.jpg, got %v", mediaInfo)
+	}
+
+	// 13. Test StoreMessageWithMeta, filename query, and media preview in ListChats
+	msgID4 := "MSG_004"
+	err = s.StoreMessageWithMeta(
+		msgID4, chatJID, "1234567890", "", now.Add(1*time.Minute), false,
+		"document", "contract_2026.pdf", "application/pdf", "", "/v/t62.7119-24/doc.enc",
+		mediaKey, fileSHA, fileEncSHA, 8192,
+	)
+	if err != nil {
+		t.Fatalf("StoreMessageWithMeta failed: %v", err)
+	}
+	_ = s.StoreChat(chatJID, chatName, now.Add(1*time.Minute))
+
+	metaInfo, err := s.GetMediaInfo(msgID4, chatJID)
+	if err != nil {
+		t.Fatalf("GetMediaInfo MSG_004 failed: %v", err)
+	}
+	if metaInfo.MimeType != "application/pdf" || metaInfo.DirectPath != "/v/t62.7119-24/doc.enc" {
+		t.Errorf("Expected mime_type and direct_path preserved, got %+v", metaInfo)
+	}
+
+	fileMatches, err := s.ListMessages(ListMessagesFilter{Query: "contract_2026.pdf", Limit: 10})
+	if err != nil || len(fileMatches) != 1 || fileMatches[0].ID != msgID4 {
+		t.Errorf("Expected filename search to find MSG_004, got %+v (err=%v)", fileMatches, err)
+	}
+
+	formatted := FormatMessage(fileMatches[0], chatName, true)
+	if !strings.Contains(formatted, "[document: contract_2026.pdf") {
+		t.Errorf("Expected filename in formatted message, got %s", formatted)
+	}
+
+	updatedChat, err := s.GetChat(chatJID, true)
+	if err != nil || updatedChat == nil {
+		t.Fatalf("GetChat after media failed: %v", err)
+	}
+	if updatedChat.LastMessage != "[document: contract_2026.pdf]" {
+		t.Errorf("Expected media preview '[document: contract_2026.pdf]', got %q", updatedChat.LastMessage)
+	}
+}
+
+func TestStore_LegacySchemaMigration(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "wa-mcp-legacy-*")
+	if err != nil {
+		t.Fatalf("Failed to create temp dir: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	dbPath := filepath.Join(tempDir, "messages.db")
+	rawDB, err := sql.Open("sqlite3", dbPath)
+	if err != nil {
+		t.Fatalf("sql.Open failed: %v", err)
+	}
+	_, err = rawDB.Exec(`
+		CREATE TABLE chats (jid TEXT PRIMARY KEY, name TEXT, last_message_time TIMESTAMP);
+		CREATE TABLE messages (
+			id TEXT, chat_jid TEXT, sender TEXT, content TEXT, timestamp TIMESTAMP,
+			is_from_me BOOLEAN, media_type TEXT, filename TEXT, url TEXT,
+			media_key BLOB, file_sha256 BLOB, file_enc_sha256 BLOB, file_length INTEGER,
+			PRIMARY KEY (id, chat_jid)
+		);
+	`)
+	if err != nil {
+		t.Fatalf("Failed creating legacy schema: %v", err)
+	}
+	rawDB.Close()
+
+	s, err := NewStore(tempDir)
+	if err != nil {
+		t.Fatalf("NewStore migration on legacy DB failed: %v", err)
+	}
+	defer s.Close()
+
+	now := time.Now()
+	_ = s.StoreChat("111@s.whatsapp.net", "Legacy User", now)
+	if err := s.StoreMessageWithMeta(
+		"L1", "111@s.whatsapp.net", "111", "hi", now, false,
+		"image", "img.png", "image/png", "", "/v/direct", []byte{1}, nil, nil, 10,
+	); err != nil {
+		t.Fatalf("StoreMessageWithMeta after migration failed: %v", err)
 	}
 }

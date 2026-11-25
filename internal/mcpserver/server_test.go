@@ -2,7 +2,10 @@ package mcpserver
 
 import (
 	"context"
+	"encoding/base64"
+	"encoding/json"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -125,5 +128,84 @@ func TestMCPServer_ToolsRegistrationAndExecution(t *testing.T) {
 	textResult = res.Content[0].(mcp.TextContent).Text
 	if !strings.Contains(textResult, "blowin in the wind") {
 		t.Errorf("Expected interaction message in result, got: %s", textResult)
+	}
+}
+
+func TestBuildMediaToolResult_ImageTextAndBinary(t *testing.T) {
+	tempDir, err := os.MkdirTemp("", "wa-mcp-media-result-*")
+	if err != nil {
+		t.Fatalf("MkdirTemp failed: %v", err)
+	}
+	defer os.RemoveAll(tempDir)
+
+	// 1. Minimal 1x1 PNG image -> should return TextContent + ImageContent
+	pngB64 := "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+	pngBytes, _ := base64.StdEncoding.DecodeString(pngB64)
+	imgPath := filepath.Join(tempDir, "sample.png")
+	if err := os.WriteFile(imgPath, pngBytes, 0644); err != nil {
+		t.Fatalf("WriteFile png failed: %v", err)
+	}
+
+	imgRes := buildMediaToolResult(imgPath, &store.MediaInfo{
+		MediaType: "image",
+		Filename:  "sample.png",
+		MimeType:  "image/png",
+	}, true)
+
+	if len(imgRes.Content) != 2 {
+		t.Fatalf("Expected 2 content items (text + image), got %d", len(imgRes.Content))
+	}
+	imgContent, ok := mcp.AsImageContent(imgRes.Content[1])
+	if !ok {
+		t.Fatalf("Expected second content item to be ImageContent, got %T", imgRes.Content[1])
+	}
+	if imgContent.MIMEType != "image/png" || imgContent.Data != pngB64 {
+		t.Errorf("Unexpected ImageContent: mime=%s dataLen=%d", imgContent.MIMEType, len(imgContent.Data))
+	}
+
+	// With includeContent=false -> text metadata only
+	metaOnlyRes := buildMediaToolResult(imgPath, &store.MediaInfo{MediaType: "image", Filename: "sample.png"}, false)
+	if len(metaOnlyRes.Content) != 1 {
+		t.Errorf("Expected 1 content item when includeContent=false, got %d", len(metaOnlyRes.Content))
+	}
+
+	// 2. UTF-8 text/CSV document -> should include inline text_content
+	csvPath := filepath.Join(tempDir, "report.csv")
+	csvBody := "name,amount\nAlice,1500\nBob,2300\n"
+	if err := os.WriteFile(csvPath, []byte(csvBody), 0644); err != nil {
+		t.Fatalf("WriteFile csv failed: %v", err)
+	}
+
+	txtRes := buildMediaToolResult(csvPath, &store.MediaInfo{
+		MediaType: "document",
+		Filename:  "report.csv",
+		MimeType:  "text/csv",
+	}, true)
+	if len(txtRes.Content) != 1 {
+		t.Fatalf("Expected 1 text content item for CSV, got %d", len(txtRes.Content))
+	}
+	var parsed map[string]interface{}
+	if err := json.Unmarshal([]byte(txtRes.Content[0].(mcp.TextContent).Text), &parsed); err != nil {
+		t.Fatalf("Invalid JSON response: %v", err)
+	}
+	if parsed["text_content"] != csvBody {
+		t.Errorf("Expected inline text_content %q, got %v", csvBody, parsed["text_content"])
+	}
+
+	// 3. Binary PDF -> metadata only without text_content
+	pdfPath := filepath.Join(tempDir, "doc.pdf")
+	_ = os.WriteFile(pdfPath, []byte("%PDF-1.7\n\x00\xff\xfe"), 0644)
+	pdfRes := buildMediaToolResult(pdfPath, &store.MediaInfo{
+		MediaType: "document",
+		Filename:  "doc.pdf",
+		MimeType:  "application/pdf",
+	}, true)
+	var pdfParsed map[string]interface{}
+	_ = json.Unmarshal([]byte(pdfRes.Content[0].(mcp.TextContent).Text), &pdfParsed)
+	if _, hasText := pdfParsed["text_content"]; hasText {
+		t.Errorf("Did not expect text_content for binary PDF")
+	}
+	if pdfParsed["mime_type"] != "application/pdf" {
+		t.Errorf("Expected application/pdf mime_type, got %v", pdfParsed["mime_type"])
 	}
 }

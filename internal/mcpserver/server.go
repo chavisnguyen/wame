@@ -1,13 +1,18 @@
 package mcpserver
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/mark3labs/mcp-go/server"
@@ -26,7 +31,7 @@ type Server struct {
 
 // NewServer registers all 13 MCP tools and initializes the MCP server
 func NewServer(waClient *whatsapp.Client, msgStore *store.Store, version ...string) *Server {
-	srvVersion := "2.0.0"
+	srvVersion := "2.1.0"
 	if len(version) > 0 && version[0] != "" {
 		srvVersion = version[0]
 	}
@@ -174,9 +179,10 @@ func (s *Server) registerTools() {
 	// 12. download_media
 	s.mcpServer.AddTool(
 		mcp.NewTool("download_media",
-			mcp.WithDescription("Download media from a WhatsApp message and get the local file path."),
+			mcp.WithDescription("Download media (image, sticker, document, audio, video) from a WhatsApp message, get its local file path, and automatically attach inline image content or readable text preview so it can be viewed directly."),
 			mcp.WithString("message_id", mcp.Required(), mcp.Description("The ID of the message containing the media")),
 			mcp.WithString("chat_jid", mcp.Required(), mcp.Description("The JID of the chat containing the message")),
+			mcp.WithBoolean("include_content", mcp.Description("Whether to return inline image content or UTF-8 text preview directly in the MCP response (default true)")),
 		),
 		s.handleDownloadMedia,
 	)
@@ -466,6 +472,11 @@ func (s *Server) handleSendAudioMessage(ctx context.Context, req mcp.CallToolReq
 	return mcp.NewToolResultText(string(data)), nil
 }
 
+const (
+	maxInlineImageBytes = 10 * 1024 * 1024 // 10 MB
+	maxInlineTextBytes  = 64 * 1024        // 64 KB
+)
+
 func (s *Server) handleDownloadMedia(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 	messageID, err := req.RequireString("message_id")
 	if err != nil {
@@ -475,24 +486,183 @@ func (s *Server) handleDownloadMedia(ctx context.Context, req mcp.CallToolReques
 	if err != nil {
 		return mcp.NewToolResultError("chat_jid is required"), nil
 	}
+	includeContent := req.GetBool("include_content", true)
 
-	filePath, err := s.waClient.DownloadMedia(ctx, messageID, chatJID)
-	if err != nil {
-		res := map[string]interface{}{
-			"success": false,
-			"message": fmt.Sprintf("Failed to download media: %v", err),
+	info, _ := s.store.GetMediaInfo(messageID, chatJID)
+
+	var filePath string
+	if s.waClient != nil {
+		filePath, err = s.waClient.DownloadMedia(ctx, messageID, chatJID)
+		if err != nil {
+			res := map[string]interface{}{
+				"success": false,
+				"message": fmt.Sprintf("Failed to download media: %v", err),
+			}
+			data, _ := json.MarshalIndent(res, "", "  ")
+			return mcp.NewToolResultError(string(data)), nil
 		}
-		data, _ := json.MarshalIndent(res, "", "  ")
-		return mcp.NewToolResultError(string(data)), nil
+	} else {
+		return mcp.NewToolResultError("WhatsApp client is not initialized"), nil
 	}
+
+	return buildMediaToolResult(filePath, info, includeContent), nil
+}
+
+func detectMediaMimeType(filePath string, sample []byte, storedMime string) string {
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".jpg", ".jpeg":
+		return "image/jpeg"
+	case ".png":
+		return "image/png"
+	case ".webp":
+		return "image/webp"
+	case ".gif":
+		return "image/gif"
+	case ".pdf":
+		return "application/pdf"
+	case ".json":
+		return "application/json"
+	case ".csv":
+		return "text/csv"
+	case ".tsv":
+		return "text/tab-separated-values"
+	case ".md", ".markdown":
+		return "text/markdown"
+	case ".txt", ".log":
+		return "text/plain"
+	case ".xml":
+		return "application/xml"
+	case ".yaml", ".yml":
+		return "application/yaml"
+	case ".html", ".htm":
+		return "text/html"
+	}
+
+	cleanStored := strings.ToLower(strings.TrimSpace(strings.Split(storedMime, ";")[0]))
+	if cleanStored != "" && cleanStored != "application/octet-stream" {
+		if cleanStored == "image/jpg" {
+			return "image/jpeg"
+		}
+		return cleanStored
+	}
+
+	if len(sample) > 0 {
+		detected := strings.ToLower(strings.TrimSpace(strings.Split(http.DetectContentType(sample), ";")[0]))
+		if detected != "" {
+			return detected
+		}
+	}
+	return "application/octet-stream"
+}
+
+func isInlineImageMime(mimeType string) bool {
+	switch mimeType {
+	case "image/jpeg", "image/png", "image/webp", "image/gif":
+		return true
+	default:
+		return false
+	}
+}
+
+func isLikelyReadableText(filePath, mimeType string, sample []byte) bool {
+	if len(sample) == 0 {
+		return true
+	}
+	if bytes.IndexByte(sample, 0) >= 0 || !utf8.Valid(sample) {
+		return false
+	}
+	if strings.HasPrefix(mimeType, "text/") {
+		return true
+	}
+	switch mimeType {
+	case "application/json", "application/xml", "application/yaml", "application/x-yaml", "application/javascript":
+		return true
+	}
+	ext := strings.ToLower(filepath.Ext(filePath))
+	switch ext {
+	case ".txt", ".md", ".markdown", ".csv", ".tsv", ".json", ".yaml", ".yml", ".xml",
+		".html", ".htm", ".log", ".ini", ".conf", ".toml", ".env", ".sql", ".sh", ".vcf",
+		".py", ".go", ".js", ".ts", ".tsx", ".jsx", ".css", ".java", ".c", ".cpp", ".rs", ".rb", ".php":
+		return true
+	}
+	return false
+}
+
+func buildMediaToolResult(filePath string, info *store.MediaInfo, includeContent bool) *mcp.CallToolResult {
+	stat, statErr := os.Stat(filePath)
+	var sizeBytes int64
+	if statErr == nil {
+		sizeBytes = stat.Size()
+	}
+
+	var storedMime, mediaType, filename string
+	if info != nil {
+		storedMime = info.MimeType
+		mediaType = info.MediaType
+		filename = info.Filename
+	}
+	if filename == "" {
+		filename = filepath.Base(filePath)
+	}
+
+	var headerSample []byte
+	if f, err := os.Open(filePath); err == nil {
+		buf := make([]byte, 512)
+		if n, _ := f.Read(buf); n > 0 {
+			headerSample = buf[:n]
+		}
+		_ = f.Close()
+	}
+
+	mimeType := detectMediaMimeType(filePath, headerSample, storedMime)
 
 	res := map[string]interface{}{
-		"success":   true,
-		"message":   "Media downloaded successfully",
-		"file_path": filePath,
+		"success":    true,
+		"message":    "Media downloaded successfully",
+		"file_path":  filePath,
+		"filename":   filename,
+		"media_type": mediaType,
+		"mime_type":  mimeType,
+		"size_bytes": sizeBytes,
 	}
+
+	if includeContent && statErr == nil {
+		if isInlineImageMime(mimeType) && sizeBytes > 0 && sizeBytes <= maxInlineImageBytes {
+			if rawBytes, err := os.ReadFile(filePath); err == nil {
+				res["inline_image"] = true
+				metaJSON, _ := json.MarshalIndent(res, "", "  ")
+				b64 := base64.StdEncoding.EncodeToString(rawBytes)
+				return mcp.NewToolResultImage(string(metaJSON), b64, mimeType)
+			}
+		}
+
+		if sizeBytes >= 0 && isLikelyReadableText(filePath, mimeType, headerSample) {
+			if f, err := os.Open(filePath); err == nil {
+				limit := sizeBytes
+				truncated := false
+				if limit > maxInlineTextBytes {
+					limit = maxInlineTextBytes
+					truncated = true
+				}
+				buf := make([]byte, limit)
+				n, _ := f.Read(buf)
+				_ = f.Close()
+				chunk := buf[:n]
+				// Trim trailing incomplete UTF-8 rune if truncated at byte boundary
+				for truncated && len(chunk) > 0 && !utf8.Valid(chunk) {
+					chunk = chunk[:len(chunk)-1]
+				}
+				if bytes.IndexByte(chunk, 0) < 0 && utf8.Valid(chunk) {
+					res["text_content"] = string(chunk)
+					res["truncated"] = truncated
+				}
+			}
+		}
+	}
+
 	data, _ := json.MarshalIndent(res, "", "  ")
-	return mcp.NewToolResultText(string(data)), nil
+	return mcp.NewToolResultText(string(data))
 }
 
 func (s *Server) handleGetWhatsAppStatus(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {

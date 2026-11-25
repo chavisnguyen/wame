@@ -54,6 +54,9 @@ func (d *MediaDownloader) GetMediaType() whatsmeow.MediaType {
 
 // ExtractDirectPathFromURL extracts direct path from a WhatsApp media URL
 func ExtractDirectPathFromURL(url string) string {
+	if url == "" {
+		return ""
+	}
 	parts := strings.SplitN(url, ".net/", 2)
 	if len(parts) < 2 {
 		return url
@@ -62,52 +65,262 @@ func ExtractDirectPathFromURL(url string) string {
 	return "/" + pathPart
 }
 
-// ExtractTextContent extracts text from a protobuf Message
+// UnwrapMessage unwraps nested WhatsApp wrapper messages (ephemeral, view-once,
+// document-with-caption, device-sent, edited, etc.) to reach the inner payload.
+func UnwrapMessage(msg *waProto.Message) *waProto.Message {
+	curr := msg
+	for depth := 0; curr != nil && depth < 8; depth++ {
+		switch {
+		case curr.GetEphemeralMessage().GetMessage() != nil:
+			curr = curr.GetEphemeralMessage().GetMessage()
+		case curr.GetViewOnceMessage().GetMessage() != nil:
+			curr = curr.GetViewOnceMessage().GetMessage()
+		case curr.GetViewOnceMessageV2().GetMessage() != nil:
+			curr = curr.GetViewOnceMessageV2().GetMessage()
+		case curr.GetViewOnceMessageV2Extension().GetMessage() != nil:
+			curr = curr.GetViewOnceMessageV2Extension().GetMessage()
+		case curr.GetDocumentWithCaptionMessage().GetMessage() != nil:
+			curr = curr.GetDocumentWithCaptionMessage().GetMessage()
+		case curr.GetDeviceSentMessage().GetMessage() != nil:
+			curr = curr.GetDeviceSentMessage().GetMessage()
+		case curr.GetEditedMessage().GetMessage() != nil:
+			curr = curr.GetEditedMessage().GetMessage()
+		case curr.GetGroupMentionedMessage().GetMessage() != nil:
+			curr = curr.GetGroupMentionedMessage().GetMessage()
+		case curr.GetBotInvokeMessage().GetMessage() != nil:
+			curr = curr.GetBotInvokeMessage().GetMessage()
+		case curr.GetProtocolMessage().GetEditedMessage() != nil:
+			curr = curr.GetProtocolMessage().GetEditedMessage()
+		default:
+			return curr
+		}
+	}
+	return curr
+}
+
+// ExtractTextContent extracts text or media caption from a protobuf Message
 func ExtractTextContent(msg *waProto.Message) string {
+	msg = UnwrapMessage(msg)
 	if msg == nil {
 		return ""
 	}
 	if text := msg.GetConversation(); text != "" {
 		return text
-	} else if extended := msg.GetExtendedTextMessage(); extended != nil {
+	}
+	if extended := msg.GetExtendedTextMessage(); extended != nil && extended.GetText() != "" {
 		return extended.GetText()
+	}
+	if img := msg.GetImageMessage(); img != nil && img.GetCaption() != "" {
+		return img.GetCaption()
+	}
+	if vid := msg.GetVideoMessage(); vid != nil && vid.GetCaption() != "" {
+		return vid.GetCaption()
+	}
+	if ptv := msg.GetPtvMessage(); ptv != nil && ptv.GetCaption() != "" {
+		return ptv.GetCaption()
+	}
+	if doc := msg.GetDocumentMessage(); doc != nil && doc.GetCaption() != "" {
+		return doc.GetCaption()
 	}
 	return ""
 }
 
-// ExtractMediaInfo extracts media metadata from a protobuf Message
-func ExtractMediaInfo(msg *waProto.Message) (mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) {
+// ExtractedMedia holds all metadata needed to index and download a WhatsApp attachment
+type ExtractedMedia struct {
+	MediaType     string
+	Filename      string
+	MimeType      string
+	URL           string
+	DirectPath    string
+	MediaKey      []byte
+	FileSHA256    []byte
+	FileEncSHA256 []byte
+	FileLength    uint64
+}
+
+func extensionForMime(mimeType, fallback string) string {
+	base := strings.ToLower(strings.TrimSpace(strings.Split(mimeType, ";")[0]))
+	switch base {
+	case "image/jpeg", "image/jpg":
+		return ".jpg"
+	case "image/png":
+		return ".png"
+	case "image/webp":
+		return ".webp"
+	case "image/gif":
+		return ".gif"
+	case "video/mp4":
+		return ".mp4"
+	case "video/quicktime":
+		return ".mov"
+	case "video/3gpp":
+		return ".3gp"
+	case "audio/ogg", "application/ogg":
+		return ".ogg"
+	case "audio/mpeg", "audio/mp3":
+		return ".mp3"
+	case "audio/mp4", "audio/aac", "audio/x-m4a":
+		return ".m4a"
+	case "audio/wav", "audio/x-wav":
+		return ".wav"
+	case "application/pdf":
+		return ".pdf"
+	case "text/plain":
+		return ".txt"
+	case "text/csv":
+		return ".csv"
+	case "text/markdown":
+		return ".md"
+	case "application/json":
+		return ".json"
+	default:
+		return fallback
+	}
+}
+
+func sanitizeIDComponent(s string) string {
+	var sb strings.Builder
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+			sb.WriteRune(r)
+		}
+	}
+	out := sb.String()
+	if len(out) > 16 {
+		out = out[len(out)-16:]
+	}
+	return out
+}
+
+// ExtractMediaDetails extracts full media metadata from a (possibly wrapped) protobuf Message
+func ExtractMediaDetails(msg *waProto.Message, msgID string, ts time.Time) ExtractedMedia {
+	msg = UnwrapMessage(msg)
 	if msg == nil {
-		return "", "", "", nil, nil, nil, 0
+		return ExtractedMedia{}
 	}
 
-	timestampStr := time.Now().Format("20060102_150405")
+	if ts.IsZero() {
+		ts = time.Now()
+	}
+	timestampStr := ts.Format("20060102_150405")
+	idSuffix := ""
+	if cleanID := sanitizeIDComponent(msgID); cleanID != "" {
+		idSuffix = "_" + cleanID
+	}
 
 	if img := msg.GetImageMessage(); img != nil {
-		return "image", "image_" + timestampStr + ".jpg",
-			img.GetURL(), img.GetMediaKey(), img.GetFileSHA256(), img.GetFileEncSHA256(), img.GetFileLength()
+		mimeType := img.GetMimetype()
+		if mimeType == "" {
+			mimeType = "image/jpeg"
+		}
+		ext := extensionForMime(mimeType, ".jpg")
+		return ExtractedMedia{
+			MediaType:     "image",
+			Filename:      fmt.Sprintf("image_%s%s%s", timestampStr, idSuffix, ext),
+			MimeType:      mimeType,
+			URL:           img.GetURL(),
+			DirectPath:    img.GetDirectPath(),
+			MediaKey:      img.GetMediaKey(),
+			FileSHA256:    img.GetFileSHA256(),
+			FileEncSHA256: img.GetFileEncSHA256(),
+			FileLength:    img.GetFileLength(),
+		}
 	}
 
-	if vid := msg.GetVideoMessage(); vid != nil {
-		return "video", "video_" + timestampStr + ".mp4",
-			vid.GetURL(), vid.GetMediaKey(), vid.GetFileSHA256(), vid.GetFileEncSHA256(), vid.GetFileLength()
+	if stk := msg.GetStickerMessage(); stk != nil {
+		mimeType := stk.GetMimetype()
+		if mimeType == "" {
+			mimeType = "image/webp"
+		}
+		ext := extensionForMime(mimeType, ".webp")
+		return ExtractedMedia{
+			MediaType:     "sticker",
+			Filename:      fmt.Sprintf("sticker_%s%s%s", timestampStr, idSuffix, ext),
+			MimeType:      mimeType,
+			URL:           stk.GetURL(),
+			DirectPath:    stk.GetDirectPath(),
+			MediaKey:      stk.GetMediaKey(),
+			FileSHA256:    stk.GetFileSHA256(),
+			FileEncSHA256: stk.GetFileEncSHA256(),
+			FileLength:    stk.GetFileLength(),
+		}
+	}
+
+	vid := msg.GetVideoMessage()
+	if vid == nil {
+		vid = msg.GetPtvMessage()
+	}
+	if vid != nil {
+		mimeType := vid.GetMimetype()
+		if mimeType == "" {
+			mimeType = "video/mp4"
+		}
+		ext := extensionForMime(mimeType, ".mp4")
+		return ExtractedMedia{
+			MediaType:     "video",
+			Filename:      fmt.Sprintf("video_%s%s%s", timestampStr, idSuffix, ext),
+			MimeType:      mimeType,
+			URL:           vid.GetURL(),
+			DirectPath:    vid.GetDirectPath(),
+			MediaKey:      vid.GetMediaKey(),
+			FileSHA256:    vid.GetFileSHA256(),
+			FileEncSHA256: vid.GetFileEncSHA256(),
+			FileLength:    vid.GetFileLength(),
+		}
 	}
 
 	if aud := msg.GetAudioMessage(); aud != nil {
-		return "audio", "audio_" + timestampStr + ".ogg",
-			aud.GetURL(), aud.GetMediaKey(), aud.GetFileSHA256(), aud.GetFileEncSHA256(), aud.GetFileLength()
+		mimeType := aud.GetMimetype()
+		if mimeType == "" {
+			mimeType = "audio/ogg"
+		}
+		ext := extensionForMime(mimeType, ".ogg")
+		return ExtractedMedia{
+			MediaType:     "audio",
+			Filename:      fmt.Sprintf("audio_%s%s%s", timestampStr, idSuffix, ext),
+			MimeType:      mimeType,
+			URL:           aud.GetURL(),
+			DirectPath:    aud.GetDirectPath(),
+			MediaKey:      aud.GetMediaKey(),
+			FileSHA256:    aud.GetFileSHA256(),
+			FileEncSHA256: aud.GetFileEncSHA256(),
+			FileLength:    aud.GetFileLength(),
+		}
 	}
 
 	if doc := msg.GetDocumentMessage(); doc != nil {
-		fname := doc.GetFileName()
-		if fname == "" {
-			fname = "document_" + timestampStr
+		mimeType := doc.GetMimetype()
+		if mimeType == "" {
+			mimeType = "application/octet-stream"
 		}
-		return "document", fname,
-			doc.GetURL(), doc.GetMediaKey(), doc.GetFileSHA256(), doc.GetFileEncSHA256(), doc.GetFileLength()
+		fname := strings.TrimSpace(doc.GetFileName())
+		if fname == "" {
+			fname = strings.TrimSpace(doc.GetTitle())
+		}
+		if fname == "" {
+			ext := extensionForMime(mimeType, "")
+			fname = fmt.Sprintf("document_%s%s%s", timestampStr, idSuffix, ext)
+		}
+		return ExtractedMedia{
+			MediaType:     "document",
+			Filename:      fname,
+			MimeType:      mimeType,
+			URL:           doc.GetURL(),
+			DirectPath:    doc.GetDirectPath(),
+			MediaKey:      doc.GetMediaKey(),
+			FileSHA256:    doc.GetFileSHA256(),
+			FileEncSHA256: doc.GetFileEncSHA256(),
+			FileLength:    doc.GetFileLength(),
+		}
 	}
 
-	return "", "", "", nil, nil, nil, 0
+	return ExtractedMedia{}
+}
+
+// ExtractMediaInfo extracts media metadata from a protobuf Message
+func ExtractMediaInfo(msg *waProto.Message) (mediaType, filename, url string, mediaKey, fileSHA256, fileEncSHA256 []byte, fileLength uint64) {
+	m := ExtractMediaDetails(msg, "", time.Now())
+	return m.MediaType, m.Filename, m.URL, m.MediaKey, m.FileSHA256, m.FileEncSHA256, m.FileLength
 }
 
 // AnalyzeOggOpus extracts duration and generates waveform for voice notes

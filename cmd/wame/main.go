@@ -26,7 +26,7 @@ import (
 )
 
 // Version is overridden at release build time via -ldflags "-X main.Version=...".
-var Version = "2.0.0"
+var Version = "2.1.0"
 
 func init() {
 	config.LoadDotEnv(".env", filepath.Join(config.HomeDir(), ".env"))

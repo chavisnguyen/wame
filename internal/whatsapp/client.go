@@ -182,26 +182,28 @@ func (c *Client) handleIncomingMessage(msg *events.Message) {
 	_ = c.store.StoreChat(chatJID, name, msg.Info.Timestamp)
 
 	content := ExtractTextContent(msg.Message)
-	mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength := ExtractMediaInfo(msg.Message)
+	media := ExtractMediaDetails(msg.Message, msg.Info.ID, msg.Info.Timestamp)
 
-	if content == "" && mediaType == "" {
+	if content == "" && media.MediaType == "" {
 		return
 	}
 
-	_ = c.store.StoreMessage(
+	_ = c.store.StoreMessageWithMeta(
 		msg.Info.ID,
 		chatJID,
 		sender,
 		content,
 		msg.Info.Timestamp,
 		msg.Info.IsFromMe,
-		mediaType,
-		filename,
-		url,
-		mediaKey,
-		fileSHA256,
-		fileEncSHA256,
-		fileLength,
+		media.MediaType,
+		media.Filename,
+		media.MimeType,
+		media.URL,
+		media.DirectPath,
+		media.MediaKey,
+		media.FileSHA256,
+		media.FileEncSHA256,
+		media.FileLength,
 	)
 }
 
@@ -232,19 +234,19 @@ func (c *Client) handleHistorySync(historySync *events.HistorySync) {
 
 			_ = c.store.StoreChat(chatJID, name, timestamp)
 
+			msgID := ""
+			if msgWrapper.Message.Key != nil && msgWrapper.Message.Key.ID != nil {
+				msgID = *msgWrapper.Message.Key.ID
+			}
+
 			var content string
+			var media ExtractedMedia
 			if msgWrapper.Message.Message != nil {
 				content = ExtractTextContent(msgWrapper.Message.Message)
+				media = ExtractMediaDetails(msgWrapper.Message.Message, msgID, timestamp)
 			}
 
-			var mediaType, filename, url string
-			var mediaKey, fileSHA256, fileEncSHA256 []byte
-			var fileLength uint64
-			if msgWrapper.Message.Message != nil {
-				mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength = ExtractMediaInfo(msgWrapper.Message.Message)
-			}
-
-			if content == "" && mediaType == "" {
+			if content == "" && media.MediaType == "" {
 				continue
 			}
 
@@ -261,14 +263,10 @@ func (c *Client) handleHistorySync(historySync *events.HistorySync) {
 				}
 			}
 
-			msgID := ""
-			if msgWrapper.Message.Key != nil && msgWrapper.Message.Key.ID != nil {
-				msgID = *msgWrapper.Message.Key.ID
-			}
-
-			_ = c.store.StoreMessage(
+			_ = c.store.StoreMessageWithMeta(
 				msgID, chatJID, sender, content, timestamp, isFromMe,
-				mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength,
+				media.MediaType, media.Filename, media.MimeType,
+				media.URL, media.DirectPath, media.MediaKey, media.FileSHA256, media.FileEncSHA256, media.FileLength,
 			)
 		}
 	}
@@ -451,6 +449,44 @@ func (c *Client) SendMessage(ctx context.Context, recipient, message, mediaPath 
 	return true, fmt.Sprintf("Message sent to %s", recipient), nil
 }
 
+// SanitizeFilename strips directory traversal components and unsafe characters
+func SanitizeFilename(name string) string {
+	base := filepath.Base(strings.ReplaceAll(name, "\\", "/"))
+	base = strings.TrimSpace(base)
+	if base == "" || base == "." || base == ".." {
+		return "attachment"
+	}
+	var sb strings.Builder
+	for _, r := range base {
+		if r == '/' || r == '\\' || r == 0 || r == ':' {
+			sb.WriteRune('_')
+		} else {
+			sb.WriteRune(r)
+		}
+	}
+	return sb.String()
+}
+
+// ResolveLocalMediaPath returns the safe local path for a message's media attachment
+func ResolveLocalMediaPath(storeDir, chatJID, messageID, filename string) (localPath, legacyPath string, err error) {
+	safeChatDir := SanitizeFilename(strings.ReplaceAll(chatJID, ":", "_"))
+	chatDir := filepath.Join(storeDir, safeChatDir)
+	if err := os.MkdirAll(chatDir, 0755); err != nil {
+		return "", "", fmt.Errorf("failed to create chat dir: %w", err)
+	}
+
+	safeName := SanitizeFilename(filename)
+	legacyPath = filepath.Join(chatDir, safeName)
+
+	safeID := sanitizeIDComponent(messageID)
+	localName := safeName
+	if safeID != "" && !strings.Contains(safeName, safeID) {
+		localName = safeID + "_" + safeName
+	}
+	localPath = filepath.Join(chatDir, localName)
+	return localPath, legacyPath, nil
+}
+
 // DownloadMedia downloads attachment for a message
 func (c *Client) DownloadMedia(ctx context.Context, messageID, chatJID string) (string, error) {
 	info, err := c.store.GetMediaInfo(messageID, chatJID)
@@ -461,28 +497,30 @@ func (c *Client) DownloadMedia(ctx context.Context, messageID, chatJID string) (
 		return "", errors.New("not a media message")
 	}
 
-	chatDir := filepath.Join(c.storeDir, strings.ReplaceAll(chatJID, ":", "_"))
-	if err := os.MkdirAll(chatDir, 0755); err != nil {
-		return "", fmt.Errorf("failed to create chat dir: %w", err)
-	}
-
-	localPath := filepath.Join(chatDir, info.Filename)
-	absPath, err := filepath.Abs(localPath)
+	localPath, legacyPath, err := ResolveLocalMediaPath(c.storeDir, chatJID, messageID, info.Filename)
 	if err != nil {
 		return "", err
 	}
 
 	if _, err := os.Stat(localPath); err == nil {
-		return absPath, nil
+		return filepath.Abs(localPath)
 	}
 
-	if info.URL == "" || len(info.MediaKey) == 0 {
+	directPath := info.DirectPath
+	if directPath == "" {
+		directPath = ExtractDirectPathFromURL(info.URL)
+	}
+
+	if (info.URL == "" && directPath == "") || len(info.MediaKey) == 0 {
+		if _, err := os.Stat(legacyPath); err == nil {
+			return filepath.Abs(legacyPath)
+		}
 		return "", errors.New("incomplete media information for download")
 	}
 
 	var waMediaType whatsmeow.MediaType
 	switch info.MediaType {
-	case "image":
+	case "image", "sticker":
 		waMediaType = whatsmeow.MediaImage
 	case "video":
 		waMediaType = whatsmeow.MediaVideo
@@ -494,7 +532,6 @@ func (c *Client) DownloadMedia(ctx context.Context, messageID, chatJID string) (
 		return "", fmt.Errorf("unsupported media type: %s", info.MediaType)
 	}
 
-	directPath := ExtractDirectPathFromURL(info.URL)
 	downloader := &MediaDownloader{
 		URL:           info.URL,
 		DirectPath:    directPath,
@@ -514,5 +551,5 @@ func (c *Client) DownloadMedia(ctx context.Context, messageID, chatJID string) (
 		return "", fmt.Errorf("failed to save downloaded file: %w", err)
 	}
 
-	return absPath, nil
+	return filepath.Abs(localPath)
 }

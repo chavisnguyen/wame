@@ -55,7 +55,9 @@ func NewStore(dir string) (*Store, error) {
 		is_from_me BOOLEAN,
 		media_type TEXT,
 		filename TEXT,
+		mime_type TEXT,
 		url TEXT,
+		direct_path TEXT,
 		media_key BLOB,
 		file_sha256 BLOB,
 		file_enc_sha256 BLOB,
@@ -75,10 +77,45 @@ func NewStore(dir string) (*Store, error) {
 		return nil, fmt.Errorf("failed to initialize schema: %w", err)
 	}
 
+	if err := ensureMessageColumns(db); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("failed to migrate schema: %w", err)
+	}
+
 	return &Store{
 		db:   db,
 		path: dbPath,
 	}, nil
+}
+
+func ensureMessageColumns(db *sql.DB) error {
+	rows, err := db.Query("PRAGMA table_info(messages)")
+	if err != nil {
+		return err
+	}
+	existing := make(map[string]bool)
+	for rows.Next() {
+		var cid int
+		var name, ctype string
+		var notNull int
+		var dflt sql.NullString
+		var pk int
+		if err := rows.Scan(&cid, &name, &ctype, &notNull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		existing[name] = true
+	}
+	rows.Close()
+
+	for _, col := range []string{"mime_type", "direct_path"} {
+		if !existing[col] {
+			if _, err := db.Exec(fmt.Sprintf("ALTER TABLE messages ADD COLUMN %s TEXT", col)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // Close closes the database connection
@@ -129,6 +166,20 @@ func (s *Store) StoreMessage(
 	mediaKey, fileSHA256, fileEncSHA256 []byte,
 	fileLength uint64,
 ) error {
+	return s.StoreMessageWithMeta(
+		id, chatJID, sender, content, timestamp, isFromMe,
+		mediaType, filename, "", url, "", mediaKey, fileSHA256, fileEncSHA256, fileLength,
+	)
+}
+
+// StoreMessageWithMeta stores or updates a message including MIME type and WhatsApp direct path
+func (s *Store) StoreMessageWithMeta(
+	id, chatJID, sender, content string,
+	timestamp time.Time, isFromMe bool,
+	mediaType, filename, mimeType, url, directPath string,
+	mediaKey, fileSHA256, fileEncSHA256 []byte,
+	fileLength uint64,
+) error {
 	if content == "" && mediaType == "" {
 		return nil
 	}
@@ -139,21 +190,23 @@ func (s *Store) StoreMessage(
 	_, err := s.db.Exec(`
 		INSERT INTO messages (
 			id, chat_jid, sender, content, timestamp, is_from_me,
-			media_type, filename, url, media_key, file_sha256, file_enc_sha256, file_length
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			media_type, filename, mime_type, url, direct_path, media_key, file_sha256, file_enc_sha256, file_length
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id, chat_jid) DO UPDATE SET
 			content = CASE WHEN excluded.content != '' THEN excluded.content ELSE messages.content END,
 			timestamp = excluded.timestamp,
 			is_from_me = excluded.is_from_me,
 			media_type = CASE WHEN excluded.media_type != '' THEN excluded.media_type ELSE messages.media_type END,
 			filename = CASE WHEN excluded.filename != '' THEN excluded.filename ELSE messages.filename END,
+			mime_type = CASE WHEN excluded.mime_type != '' THEN excluded.mime_type ELSE messages.mime_type END,
 			url = CASE WHEN excluded.url != '' THEN excluded.url ELSE messages.url END,
+			direct_path = CASE WHEN excluded.direct_path != '' THEN excluded.direct_path ELSE messages.direct_path END,
 			media_key = CASE WHEN length(excluded.media_key) > 0 THEN excluded.media_key ELSE messages.media_key END,
 			file_sha256 = CASE WHEN length(excluded.file_sha256) > 0 THEN excluded.file_sha256 ELSE messages.file_sha256 END,
 			file_enc_sha256 = CASE WHEN length(excluded.file_enc_sha256) > 0 THEN excluded.file_enc_sha256 ELSE messages.file_enc_sha256 END,
 			file_length = CASE WHEN excluded.file_length > 0 THEN excluded.file_length ELSE messages.file_length END
 	`, id, chatJID, sender, content, timestamp, isFromMe,
-		mediaType, filename, url, mediaKey, fileSHA256, fileEncSHA256, fileLength)
+		mediaType, filename, mimeType, url, directPath, mediaKey, fileSHA256, fileEncSHA256, fileLength)
 
 	return err
 }
@@ -244,7 +297,7 @@ func (s *Store) ListMessages(filter ListMessagesFilter) ([]Message, error) {
 	}
 
 	baseQuery := `
-		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, '')
+		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, ''), COALESCE(m.filename, '')
 		FROM messages m
 		LEFT JOIN chats c ON m.chat_jid = c.jid
 	`
@@ -269,8 +322,9 @@ func (s *Store) ListMessages(filter ListMessagesFilter) ([]Message, error) {
 		args = append(args, filter.ChatJID)
 	}
 	if filter.Query != "" {
-		whereClauses = append(whereClauses, "LOWER(m.content) LIKE LOWER(?)")
-		args = append(args, "%"+filter.Query+"%")
+		q := "%" + filter.Query + "%"
+		whereClauses = append(whereClauses, "(LOWER(m.content) LIKE LOWER(?) OR LOWER(COALESCE(m.filename, '')) LIKE LOWER(?) OR LOWER(COALESCE(m.media_type, '')) LIKE LOWER(?))")
+		args = append(args, q, q, q)
 	}
 
 	if len(whereClauses) > 0 {
@@ -289,7 +343,7 @@ func (s *Store) ListMessages(filter ListMessagesFilter) ([]Message, error) {
 	var messages []Message
 	for rows.Next() {
 		var msg Message
-		if err := rows.Scan(&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType); err != nil {
+		if err := rows.Scan(&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType, &msg.Filename); err != nil {
 			return nil, err
 		}
 		messages = append(messages, msg)
@@ -304,12 +358,12 @@ func (s *Store) GetMessageContext(messageID string, before, after int) (*Message
 
 	var target Message
 	err := s.db.QueryRow(`
-		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, '')
+		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, ''), COALESCE(m.filename, '')
 		FROM messages m
 		LEFT JOIN chats c ON m.chat_jid = c.jid
 		WHERE m.id = ?
 		LIMIT 1
-	`, messageID).Scan(&target.Timestamp, &target.Sender, &target.ChatName, &target.Content, &target.IsFromMe, &target.ChatJID, &target.ID, &target.MediaType)
+	`, messageID).Scan(&target.Timestamp, &target.Sender, &target.ChatName, &target.Content, &target.IsFromMe, &target.ChatJID, &target.ID, &target.MediaType, &target.Filename)
 	if err != nil {
 		return nil, fmt.Errorf("message with ID %s not found: %w", messageID, err)
 	}
@@ -323,7 +377,7 @@ func (s *Store) GetMessageContext(messageID string, before, after int) (*Message
 
 	// Messages before
 	rowsBefore, err := s.db.Query(`
-		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, '')
+		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, ''), COALESCE(m.filename, '')
 		FROM messages m
 		LEFT JOIN chats c ON m.chat_jid = c.jid
 		WHERE m.chat_jid = ? AND m.timestamp < ?
@@ -338,7 +392,7 @@ func (s *Store) GetMessageContext(messageID string, before, after int) (*Message
 	var beforeMsgs []Message
 	for rowsBefore.Next() {
 		var msg Message
-		if err := rowsBefore.Scan(&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType); err != nil {
+		if err := rowsBefore.Scan(&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType, &msg.Filename); err != nil {
 			return nil, err
 		}
 		beforeMsgs = append([]Message{msg}, beforeMsgs...) // maintain chronological order
@@ -346,7 +400,7 @@ func (s *Store) GetMessageContext(messageID string, before, after int) (*Message
 
 	// Messages after
 	rowsAfter, err := s.db.Query(`
-		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, '')
+		SELECT m.timestamp, m.sender, COALESCE(c.name, ''), m.content, m.is_from_me, m.chat_jid, m.id, COALESCE(m.media_type, ''), COALESCE(m.filename, '')
 		FROM messages m
 		LEFT JOIN chats c ON m.chat_jid = c.jid
 		WHERE m.chat_jid = ? AND m.timestamp > ?
@@ -361,7 +415,7 @@ func (s *Store) GetMessageContext(messageID string, before, after int) (*Message
 	var afterMsgs []Message
 	for rowsAfter.Next() {
 		var msg Message
-		if err := rowsAfter.Scan(&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType); err != nil {
+		if err := rowsAfter.Scan(&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType, &msg.Filename); err != nil {
 			return nil, err
 		}
 		afterMsgs = append(afterMsgs, msg)
@@ -389,6 +443,8 @@ func (s *Store) ListChats(query string, limit, page int, includeLastMessage bool
 			COALESCE(c.name, ''),
 			c.last_message_time,
 			COALESCE(m.content, ''),
+			COALESCE(m.media_type, ''),
+			COALESCE(m.filename, ''),
 			COALESCE(m.sender, ''),
 			m.is_from_me
 		FROM chats c
@@ -435,9 +491,11 @@ func (s *Store) ListChats(query string, limit, page int, includeLastMessage bool
 		var c Chat
 		var lastTime sql.NullTime
 		var isFromMe sql.NullBool
-		if err := rows.Scan(&c.JID, &c.Name, &lastTime, &c.LastMessage, &c.LastSender, &isFromMe); err != nil {
+		var rawContent, mediaType, filename string
+		if err := rows.Scan(&c.JID, &c.Name, &lastTime, &rawContent, &mediaType, &filename, &c.LastSender, &isFromMe); err != nil {
 			return nil, err
 		}
+		c.LastMessage = FormatMediaPreview(rawContent, mediaType, filename)
 		if lastTime.Valid {
 			c.LastMessageTime = &lastTime.Time
 		}
@@ -460,6 +518,8 @@ func (s *Store) GetChat(chatJID string, includeLastMessage bool) (*Chat, error) 
 			COALESCE(c.name, ''),
 			c.last_message_time,
 			COALESCE(m.content, ''),
+			COALESCE(m.media_type, ''),
+			COALESCE(m.filename, ''),
 			COALESCE(m.sender, ''),
 			m.is_from_me
 		FROM chats c
@@ -479,13 +539,15 @@ func (s *Store) GetChat(chatJID string, includeLastMessage bool) (*Chat, error) 
 	var c Chat
 	var lastTime sql.NullTime
 	var isFromMe sql.NullBool
-	err := s.db.QueryRow(query, chatJID).Scan(&c.JID, &c.Name, &lastTime, &c.LastMessage, &c.LastSender, &isFromMe)
+	var rawContent, mediaType, filename string
+	err := s.db.QueryRow(query, chatJID).Scan(&c.JID, &c.Name, &lastTime, &rawContent, &mediaType, &filename, &c.LastSender, &isFromMe)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
+	c.LastMessage = FormatMediaPreview(rawContent, mediaType, filename)
 	if lastTime.Valid {
 		c.LastMessageTime = &lastTime.Time
 	}
@@ -507,6 +569,8 @@ func (s *Store) GetDirectChatByContact(phoneNumber string) (*Chat, error) {
 			COALESCE(c.name, ''),
 			c.last_message_time,
 			COALESCE(m.content, ''),
+			COALESCE(m.media_type, ''),
+			COALESCE(m.filename, ''),
 			COALESCE(m.sender, ''),
 			m.is_from_me
 		FROM chats c
@@ -518,13 +582,15 @@ func (s *Store) GetDirectChatByContact(phoneNumber string) (*Chat, error) {
 	var c Chat
 	var lastTime sql.NullTime
 	var isFromMe sql.NullBool
-	err := s.db.QueryRow(query, "%"+cleanPhone+"%").Scan(&c.JID, &c.Name, &lastTime, &c.LastMessage, &c.LastSender, &isFromMe)
+	var rawContent, mediaType, filename string
+	err := s.db.QueryRow(query, "%"+cleanPhone+"%").Scan(&c.JID, &c.Name, &lastTime, &rawContent, &mediaType, &filename, &c.LastSender, &isFromMe)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			return nil, nil
 		}
 		return nil, err
 	}
+	c.LastMessage = FormatMediaPreview(rawContent, mediaType, filename)
 	if lastTime.Valid {
 		c.LastMessageTime = &lastTime.Time
 	}
@@ -553,11 +619,14 @@ func (s *Store) GetContactChats(jid string, limit, page int) ([]Chat, error) {
 			c.jid,
 			COALESCE(c.name, ''),
 			c.last_message_time,
-			COALESCE(m.content, ''),
-			COALESCE(m.sender, ''),
-			m.is_from_me
+			COALESCE(lm.content, ''),
+			COALESCE(lm.media_type, ''),
+			COALESCE(lm.filename, ''),
+			COALESCE(lm.sender, ''),
+			lm.is_from_me
 		FROM chats c
 		JOIN messages m ON c.jid = m.chat_jid
+		LEFT JOIN messages lm ON c.jid = lm.chat_jid AND c.last_message_time = lm.timestamp
 		WHERE m.sender = ? OR m.sender LIKE ? OR c.jid = ?
 		ORDER BY c.last_message_time DESC NULLS LAST
 		LIMIT ? OFFSET ?
@@ -573,9 +642,11 @@ func (s *Store) GetContactChats(jid string, limit, page int) ([]Chat, error) {
 		var c Chat
 		var lastTime sql.NullTime
 		var isFromMe sql.NullBool
-		if err := rows.Scan(&c.JID, &c.Name, &lastTime, &c.LastMessage, &c.LastSender, &isFromMe); err != nil {
+		var rawContent, mediaType, filename string
+		if err := rows.Scan(&c.JID, &c.Name, &lastTime, &rawContent, &mediaType, &filename, &c.LastSender, &isFromMe); err != nil {
 			return nil, err
 		}
+		c.LastMessage = FormatMediaPreview(rawContent, mediaType, filename)
 		if lastTime.Valid {
 			c.LastMessageTime = &lastTime.Time
 		}
@@ -606,7 +677,8 @@ func (s *Store) GetLastInteraction(jid string) (*Message, error) {
 			m.is_from_me,
 			m.chat_jid,
 			m.id,
-			COALESCE(m.media_type, '')
+			COALESCE(m.media_type, ''),
+			COALESCE(m.filename, '')
 		FROM messages m
 		JOIN chats c ON m.chat_jid = c.jid
 		WHERE m.sender = ? OR m.sender LIKE ? OR c.jid = ?
@@ -615,7 +687,7 @@ func (s *Store) GetLastInteraction(jid string) (*Message, error) {
 	`
 	var msg Message
 	err := s.db.QueryRow(query, jid, "%"+phonePart+"%", jid).Scan(
-		&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType,
+		&msg.Timestamp, &msg.Sender, &msg.ChatName, &msg.Content, &msg.IsFromMe, &msg.ChatJID, &msg.ID, &msg.MediaType, &msg.Filename,
 	)
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -630,7 +702,9 @@ func (s *Store) GetLastInteraction(jid string) (*Message, error) {
 type MediaInfo struct {
 	MediaType     string
 	Filename      string
+	MimeType      string
 	URL           string
+	DirectPath    string
 	MediaKey      []byte
 	FileSHA256    []byte
 	FileEncSHA256 []byte
@@ -644,12 +718,17 @@ func (s *Store) GetMediaInfo(messageID, chatJID string) (*MediaInfo, error) {
 
 	var info MediaInfo
 	err := s.db.QueryRow(`
-		SELECT COALESCE(media_type, ''), COALESCE(filename, ''), COALESCE(url, ''),
+		SELECT COALESCE(media_type, ''), COALESCE(filename, ''), COALESCE(mime_type, ''),
+		       COALESCE(url, ''), COALESCE(direct_path, ''),
 		       COALESCE(media_key, X''), COALESCE(file_sha256, X''), COALESCE(file_enc_sha256, X''), COALESCE(file_length, 0)
 		FROM messages
 		WHERE id = ? AND chat_jid = ?
 		LIMIT 1
-	`, messageID, chatJID).Scan(&info.MediaType, &info.Filename, &info.URL, &info.MediaKey, &info.FileSHA256, &info.FileEncSHA256, &info.FileLength)
+	`, messageID, chatJID).Scan(
+		&info.MediaType, &info.Filename, &info.MimeType,
+		&info.URL, &info.DirectPath,
+		&info.MediaKey, &info.FileSHA256, &info.FileEncSHA256, &info.FileLength,
+	)
 
 	if err != nil {
 		return nil, err

@@ -61,7 +61,11 @@ func FormatMessage(msg Message, senderName string, showChatInfo bool) string {
 
 	contentPrefix := ""
 	if msg.MediaType != "" {
-		contentPrefix = fmt.Sprintf("[%s - Message ID: %s - Chat JID: %s] ", msg.MediaType, msg.ID, msg.ChatJID)
+		if msg.Filename != "" {
+			contentPrefix = fmt.Sprintf("[%s: %s - Message ID: %s - Chat JID: %s] ", msg.MediaType, msg.Filename, msg.ID, msg.ChatJID)
+		} else {
+			contentPrefix = fmt.Sprintf("[%s - Message ID: %s - Chat JID: %s] ", msg.MediaType, msg.ID, msg.ChatJID)
+		}
 	}
 
 	sender := senderName
@@ -73,6 +77,21 @@ func FormatMessage(msg Message, senderName string, showChatInfo bool) string {
 
 	sb.WriteString(fmt.Sprintf("From %s: %s%s\n", sender, contentPrefix, msg.Content))
 	return sb.String()
+}
+
+// FormatMediaPreview builds a concise preview for chat list last_message fields
+func FormatMediaPreview(content, mediaType, filename string) string {
+	if mediaType == "" {
+		return content
+	}
+	label := fmt.Sprintf("[%s]", mediaType)
+	if mediaType == "document" && filename != "" {
+		label = fmt.Sprintf("[%s: %s]", mediaType, filename)
+	}
+	if content != "" {
+		return label + " " + content
+	}
+	return label
 }
 
 // FormatMessagesList formats a list of messages into a single text block
