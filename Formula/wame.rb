@@ -13,20 +13,20 @@ class Wame < Formula
 
   on_macos do
     on_arm do
-      url "https://github.com/chavisnguyen/wame/releases/download/v2.0.0/wame-darwin-arm64.tar.gz"
-      sha256 "4feb325b8cc69e1cb610047d22ddb2251a3262fab405cf8d909a3271282951eb"
+      url "https://github.com/chavisnguyen/wame/releases/download/v2.1.0/wame-darwin-arm64.tar.gz"
+      sha256 "091951213015578b0920b619ddba4d63766fe4bf6963daf48d6e6d83614b5545"
     end
     on_intel do
-      url "https://github.com/chavisnguyen/wame/releases/download/v2.0.0/wame-darwin-amd64.tar.gz"
-      sha256 "95f16c12374ae88230ddcce1dd3542b89c03579d0227ddffa3f23dcd0075254a"
+      url "https://github.com/chavisnguyen/wame/releases/download/v2.1.0/wame-darwin-amd64.tar.gz"
+      sha256 "0a6d59e1bfca4c5b5ec3647b61c4a748aac56caaebf0011f84ba8c79f24c0de0"
     end
   end
 
   on_linux do
     # Prebuilt Linux binaries are x86_64 only.
     depends_on arch: :x86_64
-    url "https://github.com/chavisnguyen/wame/releases/download/v2.0.0/wame-linux-amd64.tar.gz"
-    sha256 "5fb590a2a6c9c0a9182455dfb7af3092e76c872b9568082957ede3b3cfd6bfa2"
+    url "https://github.com/chavisnguyen/wame/releases/download/v2.1.0/wame-linux-amd64.tar.gz"
+    sha256 "127cffd52f9998651bbd242209c5e455b014fb60711751fa6a637b7c8d5e7acd"
   end
 
   def install
