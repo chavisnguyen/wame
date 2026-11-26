@@ -26,7 +26,7 @@ import (
 )
 
 // Version is overridden at release build time via -ldflags "-X main.Version=...".
-var Version = "2.1.0"
+var Version = "2.2.0"
 
 func init() {
 	config.LoadDotEnv(".env", filepath.Join(config.HomeDir(), ".env"))
@@ -103,6 +103,13 @@ func main() {
 		runDoctor(*port, resolvedStoreDir)
 		return
 
+	case "service":
+		if err := runServiceCmd(flag.Arg(1), *port); err != nil {
+			fmt.Fprintf(os.Stderr, "Service error: %v\n", err)
+			os.Exit(1)
+		}
+		return
+
 	case "serve":
 		runServe(resolvedStoreDir, *verbose)
 		return
@@ -122,12 +129,13 @@ Usage:
   wame [flags] [command]
 
 Commands:
-  setup       One-command setup: prepare store & register "whatsapp" MCP in AI clients
-  daemon      Run HTTP/SSE daemon (shared endpoint http://localhost:3026/mcp)
+  setup       Prepare persistent store directory (~/.wame/store)
+  service     Manage background daemon (start | stop | restart | status | uninstall)
+  daemon      Run HTTP/SSE daemon in foreground (endpoint http://localhost:3026/mcp)
   serve       Run MCP server over stdio (default when -sse is omitted)
   login       Pair WhatsApp account by scanning QR code in terminal
   status      Check current WhatsApp login & session status
-  doctor      Diagnose store, WhatsApp session, FFmpeg, daemon, and AI client configs
+  doctor      Diagnose store, WhatsApp session, FFmpeg, and daemon health
   version     Show application version
   help        Show this help
 
@@ -417,61 +425,11 @@ func runDoctor(port, storeDir string) {
 	httpClient := &http.Client{Timeout: 1200 * time.Millisecond}
 	resp, err := httpClient.Get(daemonURL)
 	if err != nil {
-		fmt.Printf("⚪ Daemon (:%s): Not running (Run 'brew services start wame' or 'make daemon')\n", port)
+		fmt.Printf("⚪ Daemon (:%s): Not running (Run 'wame service start' or 'brew services start wame')\n", port)
 	} else {
 		_ = resp.Body.Close()
 		fmt.Printf("🟢 Daemon (:%s): Running and reachable at http://localhost:%s/mcp\n", port, port)
 	}
 
-	// 4. AI Client Configuration Checks
-	home, _ := os.UserHomeDir()
-	codexHome := os.Getenv("CODEX_HOME")
-	if codexHome == "" {
-		codexHome = filepath.Join(home, ".codex")
-	}
-	fmt.Println("\n🔍 AI Client Configuration Status:")
-
-	checkClientConfig("Antigravity (AGY)", filepath.Join(home, ".gemini/config/mcp_config.json"))
-	checkOpenCodeConfig(filepath.Join(home, ".config/opencode"))
-	checkClientConfig("Claude Code (CLI)", filepath.Join(home, ".claude.json"))
-	checkClientConfig("Kiro", filepath.Join(home, ".kiro/settings/mcp.json"))
-	checkClientConfig("Claude Desktop", filepath.Join(home, "Library/Application Support/Claude/claude_desktop_config.json"))
-	checkClientConfig("Codex", filepath.Join(codexHome, "config.toml"))
-
-	fmt.Printf("\n✨ Doctor check complete! Run 'wame setup' to configure clients automatically.\n")
-}
-
-func checkOpenCodeConfig(dir string) {
-	for _, name := range []string{"opencode.jsonc", "opencode.json"} {
-		p := filepath.Join(dir, name)
-		if _, err := os.Stat(p); err == nil {
-			checkClientConfig("OpenCode", p)
-			return
-		}
-	}
-	fmt.Printf("  ⚪ OpenCode: Config file not found in %s\n", dir)
-}
-
-func checkClientConfig(name, path string) {
-	if _, err := os.Stat(path); os.IsNotExist(err) {
-		fmt.Printf("  ⚪ %s: Config file not found at %s\n", name, path)
-		return
-	}
-
-	data, err := os.ReadFile(path)
-	if err != nil {
-		fmt.Printf("  🔴 %s: Cannot read %s: %v\n", name, path, err)
-		return
-	}
-
-	content := string(data)
-	if strings.Contains(content, "1craft-wa-mcp") || strings.Contains(content, "whatsapp-mcp") {
-		fmt.Printf("  🟡 %s: Legacy path found in %s (run 'wame setup' to update)\n", name, path)
-		return
-	}
-	if strings.Contains(content, "whatsapp") {
-		fmt.Printf("  🟢 %s: Configured in %s\n", name, path)
-	} else {
-		fmt.Printf("  🟡 %s: File exists but 'whatsapp' server is not configured yet\n", name)
-	}
+	fmt.Printf("\n✨ Doctor check complete! Register http://localhost:%s/mcp in your agents via `mcps`.\n", port)
 }

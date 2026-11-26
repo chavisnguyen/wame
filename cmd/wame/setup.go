@@ -4,15 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"os/exec"
-	"strings"
 	"time"
-
-	"wame"
 )
 
-// runSetup prepares the persistent store directory and registers the "whatsapp" MCP server
-// across all detected AI clients using the embedded install.sh script.
+// runSetup prepares the persistent store directory (~/.wame/store).
+// MCP client registration is handled centrally by mcps.
 func runSetup(port, storeDir string) error {
 	fmt.Printf("🔧 wame setup (v%s)\n\n", Version)
 
@@ -20,18 +16,6 @@ func runSetup(port, storeDir string) error {
 		return fmt.Errorf("create store dir %s: %w", storeDir, err)
 	}
 	fmt.Printf("✅ Store directory ready: %s\n", storeDir)
-
-	exe, _ := os.Executable()
-	cmd := exec.Command("bash", "-s", "sse")
-	cmd.Stdin = strings.NewReader(string(wame.InstallScript))
-	cmd.Env = append(os.Environ(),
-		"WAME_BIN="+exe,
-		"PORT="+port,
-	)
-	cmd.Stdout, cmd.Stderr = os.Stdout, os.Stderr
-	if err := cmd.Run(); err != nil {
-		fmt.Printf("⚠️  Could not auto-register MCP in your agents (%v).\n   Add this URL manually: http://localhost:%s/mcp\n", err, port)
-	}
 
 	client := &http.Client{Timeout: 1500 * time.Millisecond}
 	daemonRunning := false
@@ -49,14 +33,16 @@ func runSetup(port, storeDir string) error {
 `)
 	if !daemonRunning {
 		fmt.Printf(`2. Start background daemon:
-     brew services start wame   (or: make daemon)
+     wame service start   (or: brew services start wame)
 `)
 	} else {
 		fmt.Printf("2. Daemon is already running at http://localhost:%s/mcp\n", port)
 	}
-	fmt.Printf(`3. Run diagnostics anytime:
+	fmt.Printf(`3. Register endpoint via mcps:
+     mcps add whatsapp --url http://localhost:%s/mcp
+4. Run diagnostics anytime:
      wame doctor
 ========================================================
-`)
+`, port)
 	return nil
 }

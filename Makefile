@@ -23,14 +23,6 @@ build:
 	@go build -o $(BIN_PATH) ./cmd/wame
 	@echo "✅ Build success: $(BIN_PATH)"
 
-## install-sse: Configure MCP server in HTTP/SSE daemon mode (Recommended for multiple AI agents)
-install-sse: build
-	@WAME_BIN="$(CURDIR)/$(BIN_PATH)" PORT=$(PORT) ./install.sh sse
-
-## install-stdio: Configure MCP server in stdio mode (Standalone binary)
-install-stdio: build
-	@WAME_BIN="$(CURDIR)/$(BIN_PATH)" PORT=$(PORT) ./install.sh stdio
-
 ## install: Install binary to $GOPATH/bin
 install:
 	go install ./cmd/wame

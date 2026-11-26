@@ -19,11 +19,13 @@ Lightweight WhatsApp [Model Context Protocol (MCP)](https://modelcontextprotocol
 ```bash
 brew tap chavisnguyen/wame https://github.com/chavisnguyen/wame
 brew install wame
-wame setup                 # Prepare ~/.wame/store and register "whatsapp" in all AI clients
+wame setup                 # Prepare ~/.wame/store
 wame login                 # Scan QR code in terminal (one-time)
-brew services start wame   # Start background daemon on :3026 (auto-starts at login)
-wame doctor                # Verify store, session, daemon, and client configs
+wame service start         # Or: brew services start wame (runs on :3026)
+wame doctor                # Verify store, session, and daemon
 ```
+
+Register `http://localhost:3026/mcp` in your AI coding tools via [`mcps`](https://github.com/chavisnguyen/mcps) (`mcps add whatsapp --url http://localhost:3026/mcp`).
 
 ### Option B: Build from source
 
